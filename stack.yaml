@@ -1,0 +1,8 @@
+flags: {}
+packages:
+- '.'
+- location:
+    git: git@github.com:mitchellwrosen/lua-parser
+    commit: b0a2c785d7dd7c10043670221443b9226d797201
+extra-deps: []
+resolver: nightly-2015-08-07
