@@ -16,15 +16,21 @@ cabal-version:       >=1.10
 library
   hs-source-dirs:      src
   exposed-modules:     Queries
-                     , Style
+                     , Static
   build-depends:       base >= 4.7 && < 5
+                     , containers
                      , language-lua
                      , microlens
                      , mtl
                      , srcloc
+                     , text
                      , uniplate
   default-language:    Haskell2010
-  default-extensions: GeneralizedNewtypeDeriving
+  default-extensions:  FlexibleInstances
+                     , GeneralizedNewtypeDeriving
+                     , OverloadedLists
+                     , OverloadedStrings
+                     , ViewPatterns
   ghc-options:        -Wall
 
 executable llint
@@ -35,6 +41,7 @@ executable llint
                      , language-lua
                      , llint
                      , mtl
+                     , text
   default-language:    Haskell2010
 
 test-suite llint-test

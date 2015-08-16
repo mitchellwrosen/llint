@@ -3,25 +3,28 @@
 module Main where
 
 import Queries
-import Style
+import Static
 
-import Language.Lua.Parser
-import Language.Lua.Syntax
-import System.Environment
-import System.Exit
-import System.IO
+import           Language.Lua.Parser
+import           Language.Lua.Syntax
+import           System.Environment
+import           System.Exit
+import           System.IO
+import qualified Data.Text.IO        as T
 
 main :: IO ()
 main = getArgs >>= \case
     [file] -> do
         chunk <- parseLua file <$> readFile file
-        mapM_ putStrLn $ runStyler (StyleGuide 4) (styler chunk)
+
+        mapM_ (T.putStrLn . showSuggestion) $
+            runStatic (StyleGuide 4) (staticAnalysis chunk)
     _ -> do
         progName <- getProgName
         hPutStrLn stderr $ "Usage: " ++ progName ++ " <filename>"
         exitFailure
 
-styler :: Chunk NodeInfo -> Styler ()
-styler chunk = do
-     mapM_ styleCheckBlock     (allBlocks chunk)
-     mapM_ styleCheckStatement (allStatements chunk)
+staticAnalysis :: Chunk NodeInfo -> Static ()
+staticAnalysis chunk = do
+     mapM_ staticBlock     (allBlocks     chunk)
+     mapM_ staticStatement (allStatements chunk)
