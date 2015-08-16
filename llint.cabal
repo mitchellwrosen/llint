@@ -2,7 +2,7 @@ name:                llint
 version:             0.1.0.0
 synopsis:            Lua linter
 description:         Lua linter
-homepage:            http://github.com/mitchellwrosen/llint
+homepage:            https://github.com/mitchellwrosen/llint
 license:             BSD3
 license-file:        LICENSE
 author:              Mitchell Rosen
@@ -15,16 +15,26 @@ cabal-version:       >=1.10
 
 library
   hs-source-dirs:      src
-  exposed-modules:     Lib
+  exposed-modules:     Queries
+                     , Style
   build-depends:       base >= 4.7 && < 5
+                     , language-lua
+                     , microlens
+                     , mtl
+                     , srcloc
+                     , uniplate
   default-language:    Haskell2010
+  default-extensions: GeneralizedNewtypeDeriving
+  ghc-options:        -Wall
 
 executable llint
   hs-source-dirs:      app
   main-is:             Main.hs
   ghc-options:         -threaded -rtsopts -with-rtsopts=-N
   build-depends:       base
+                     , language-lua
                      , llint
+                     , mtl
   default-language:    Haskell2010
 
 test-suite llint-test
@@ -38,4 +48,4 @@ test-suite llint-test
 
 source-repository head
   type:     git
-  location: https://github.com/name/project
+  location: https://github.com/mitchellwrosen/llint
