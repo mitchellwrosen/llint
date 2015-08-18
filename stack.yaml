@@ -3,6 +3,6 @@ packages:
 - '.'
 - location:
     git: https://github.com/mitchellwrosen/lua-parser
-    commit: 89fbc053ce1c89126c8b6e2c61062b9f82ffd28c
+    commit: 891758c341542afd239260169d9948fbeefbcb82
 extra-deps: []
 resolver: nightly-2015-08-07
