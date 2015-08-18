@@ -193,6 +193,7 @@ staticStatement (Do info block) = do
                 style "'end' does not align with corresponding 'do'" endPos
 -- TODO: the rest
 staticStatement (While info exp block) = ok
+staticStatement _ = ok
 
 tshow :: Show a => a -> Text
 tshow = T.pack . show
