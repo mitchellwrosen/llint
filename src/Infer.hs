@@ -13,6 +13,12 @@ import qualified Data.Set                   as S
 import           Language.Lua.Syntax
 import           Lens.Micro
 
+import Language.Lua.Parser
+
+-- Quick-and-dirty block inference
+debugInfer :: FilePath -> IO (Either TypeError Scheme)
+debugInfer = fmap (infer mempty . parseLua "") . readFile
+
 --------------------------------------------------------------------------------
 -- Type stuff
 
@@ -110,26 +116,39 @@ runInferExpr :: InferExpr a -> Either TypeError (a, [Constraint])
 runInferExpr m = evalRWST (unInferExpr m) mempty tvarSupply
 
 -- Block inference monad.
+-- * Read/write global type environment
+-- * Read/write stack of local type environments
 -- * Writes constraints to be solved
 -- * Writes all returned types seen so far in the block
--- * Read/write type environment
 -- * Fresh type variable supply
 -- * Can throw type errors
-newtype InferBlock a = InferBlock { unInferBlock :: WriterT ([Constraint], [Type]) (StateT (TypeEnv, TVarSupply) (Either TypeError)) a }
-  deriving (Functor, Applicative, Monad, MonadWriter ([Constraint], [Type]), MonadState (TypeEnv, TVarSupply), MonadError TypeError)
+newtype InferBlock a = InferBlock { unInferBlock :: WriterT ([Constraint], [Type]) (StateT InferBlockState (Either TypeError)) a }
+  deriving (Functor, Applicative, Monad, MonadWriter ([Constraint], [Type]), MonadState InferBlockState, MonadError TypeError)
 
 instance MonadInfer InferBlock where
     freshType = do
-        (env, (s:ss)) <- get
-        put (env, ss)
+        InferBlockState localEnvs globalEnv (s:ss) <- get
+        put $ InferBlockState localEnvs globalEnv ss
         pure (TVar s)
 
-    getEnv = gets fst
+    -- Left-biased type environment due to shadowing.
+    getEnv = do
+        InferBlockState locals globals _ <- get
+        pure $ mconcat locals <> globals
 
     unify t1 t2 = tell ([(t1, t2)], [])
 
+data InferBlockState = InferBlockState
+    { inferBlockLocalEnvs  :: [TypeEnv]
+    , inferBlockGlobalEnv  :: TypeEnv
+    , inferBlockTVarSupply :: TVarSupply
+    }
+
 runInferBlock :: InferBlock a -> Either TypeError (a, [Constraint])
-runInferBlock m = (\((a, (cs, _)), _) -> (a, cs)) <$> runStateT (runWriterT (unInferBlock m)) (mempty, tvarSupply)
+runInferBlock m = (\((a, (cs, _)), _) -> (a, cs)) <$> runStateT (runWriterT (unInferBlock m)) initState
+  where
+    initState :: InferBlockState
+    initState = InferBlockState [] mempty tvarSupply
 
 returnsType :: Type -> InferBlock ()
 returnsType t = tell ([], [t])
@@ -151,13 +170,13 @@ generalize t = do
     env <- getEnv
     pure $ Forall (ftv t \\ ftv env) t
 
-infer :: Show a => TypeEnv -> Block a -> Either TypeError Type
+infer :: TypeEnv -> Block a -> Either TypeError Scheme
 infer env block = do
     (t, cs) <- runInferBlock (inferBlock block)
     s <- constraintSolver mempty cs
     pure . closeOver $ apply s t
 
-inferBlock :: Show a => Block a -> InferBlock Type
+inferBlock :: Block a -> InferBlock Type
 inferBlock (Block _ ss mr) = do
     (_, (_, ts)) <- listen (mapM_ inferStmt ss)
     case mr of
@@ -195,29 +214,45 @@ inferBlock (Block _ ss mr) = do
     mapInit f [x]    = [x]
     mapInit f (x:xs) = f x : mapInit f xs
 
-inferStmt :: Show a => Statement a -> InferBlock ()
+inferStmt :: Statement a -> InferBlock ()
 inferStmt (EmptyStmt _) = pure ()
-inferStmt s@(Assign _ (VariableList1 _ vs) (ExpressionList1 _ es)) = do
-    f <- go (NE.toList vs) (NE.toList es)
-    _1 %= f
+inferStmt (Assign _ (VariableList1 _ vs) (ExpressionList1 _ es)) = do
+    newVars <- go (NE.toList vs) (NE.toList es)
+    localEnvs <- gets inferBlockLocalEnvs
+    forM_ newVars $ \(v, t) -> do
+        (localEnvs', wasInserted) <- insertLocal v t localEnvs
+        if wasInserted
+            then modify (\(InferBlockState _ y z) -> InferBlockState localEnvs' y z)
+            else do
+                globalEnv <- gets inferBlockGlobalEnv
+                case M.lookup v globalEnv of
+                    Just s -> do
+                        t' <- instantiate s
+                        tv <- freshType
+                        unify t tv
+                        unify t' tv
+                        let globalEnv' = M.insert v (Forall [] tv) globalEnv
+                        modify (\(InferBlockState x _ z) -> InferBlockState x globalEnv' z)
+                    Nothing -> do
+                        s <- generalize t
+                        let globalEnv' = M.insert v s globalEnv
+                        modify (\(InferBlockState x _ z) -> InferBlockState x globalEnv' z)
   where
-    -- Perform type inference on the expressions and build up a function to
-    -- apply to the environment after all expressions are checked. This is
-    -- because in lua, the assignment to multiple variables happens
-    -- instantaneously, rather than left-to-right.
-    go :: [Variable a] -> [Expression a] -> InferBlock (TypeEnv -> TypeEnv)
+    -- Perform type inference on the expressions and build up a list of
+    -- inferrred types to apply to the appropriate environment after the fact.
+    go :: [Variable a] -> [Expression a] -> InferBlock [(Var, Type)]
     -- We ran out of variables to assign to, as in the statement
     --
     --     x, y = f(), g(), h()
     --
     -- Simply infer the types of the unused expressions (we still want to write
     -- constraints and throw type errors), and toss the results.
-    go [] es = id <$ mapM_ inferExpr es
+    go [] es = [] <$ mapM_ inferExpr es
     -- One expression is being assigned to one or more variables. Graft the
     -- result type over the list.
     go vs [e] = do
         t <- inferExpr e
-        graft t vs
+        pure (graft t vs)
     -- More than one expression is being assigned to one or more variables;
     -- therefore, if the expression returns multiple values, it gets adjusted
     -- to only return the first.
@@ -225,9 +260,7 @@ inferStmt s@(Assign _ (VariableList1 _ vs) (ExpressionList1 _ es)) = do
         case v of
             VarIdent _ (Ident _ x) -> do
                 t <- adjustManyToOne <$> inferExpr e
-                f <- M.insert x <$> generalize t
-                f' <- go vs es
-                pure $ f' . f
+                ((x, t) :) <$> go vs es
             -- TODO: Other variables
             _ -> do
                 _ <- inferExpr e
@@ -246,19 +279,16 @@ inferStmt s@(Assign _ (VariableList1 _ vs) (ExpressionList1 _ es)) = do
     --
     -- When the type is not a TMany, assign it to the first variable. All
     -- remaining variables are nil.
-    graft :: Type -> [Variable a] -> InferBlock (TypeEnv -> TypeEnv)
+    graft :: Type -> [Variable a] -> [(Var, Type)]
     -- We ran out of variables, as in
     --
     --     x, y = f()
     --
     -- where f() returns three values. Just toss the remaining types.
-    graft _ [] = pure id
+    graft _ [] = []
     graft (TMany (t:ts)) (v:vs) =
         case v of
-            VarIdent _ (Ident _ x) -> do
-                f <- M.insert x <$> generalize t
-                f' <- graft (TMany ts) vs
-                pure $ f' . f
+            VarIdent _ (Ident _ x) -> (x, t) : graft (TMany ts) vs
             -- TODO: Other variables
             _ -> graft (TMany ts) vs
     -- We ran out of types to assign, as in
@@ -273,17 +303,33 @@ inferStmt s@(Assign _ (VariableList1 _ vs) (ExpressionList1 _ es)) = do
     --
     -- Assign the type to the first. All remaining variables are nil.
     graft t (v:vs) = do
-        f <- case v of
-                 VarIdent _ (Ident _ x) -> M.insert x <$> generalize t
-                 _ -> pure id
-        f' <- allNil vs
-        pure $ f' . f
+        case v of
+            VarIdent _ (Ident _ x) -> (x, t) : allNil vs
+            -- TODO: Other variables
+            _ -> allNil vs
 
-    allNil :: [Variable a] -> InferBlock (TypeEnv -> TypeEnv)
-    allNil vs = allNil' [x | VarIdent _ (Ident _ x) <- vs] -- TODO: Other variables
+    allNil :: [Variable a] -> [(Var, Type)]
+    allNil vs = map (, TNil) [x | VarIdent _ (Ident _ x) <- vs] -- TODO: Other variables
+
+    -- Look for the given variable in all local environments; if found,
+    -- unify with the existing type and re-insert. Returns the (possibly)
+    -- modified stack of local environments, and whether or not any
+    -- modification took place.
+    insertLocal :: Var -> Type -> [TypeEnv] -> InferBlock ([TypeEnv], Bool)
+    insertLocal = insertLocal' []
       where
-        allNil' :: [Var] -> InferBlock (TypeEnv -> TypeEnv)
-        allNil' = pure . foldr (\x f -> f . M.insert x (Forall mempty TNil)) id
+        insertLocal' :: [TypeEnv] -> Var -> Type -> [TypeEnv] -> InferBlock ([TypeEnv], Bool)
+        insertLocal' acc _ _ [] = pure (reverse acc, False)
+        insertLocal' acc v t (env:envs) = do
+            case M.lookup v env of
+                Just s -> do
+                    t' <- instantiate s
+                    tv <- freshType
+                    unify t tv
+                    unify t' tv
+                    let env' = M.insert v (Forall [] tv) env
+                    pure (reverse acc ++ [env'] ++ envs, True)
+                Nothing -> insertLocal' (env:acc) v t envs
 inferStmt _ = error "inferStmt: TODO"
 
 inferExpr :: MonadInfer m => Expression a -> m Type
