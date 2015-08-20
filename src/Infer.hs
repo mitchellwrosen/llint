@@ -44,22 +44,20 @@ data TypeError
 --------------------------------------------------------------------------------
 -- Substitutable
 
-newtype Subst = Subst (Map TVar Type)
-    deriving (Eq, Show)
+type Subst = Map TVar Type
 
-instance Monoid Subst where
-    mempty = Subst mempty
-    s1 `mappend` s2@(Subst m2) = Subst (fmap (apply s1) m2) <> s1
+composeSubst :: Subst -> Subst -> Subst
+composeSubst s1 s2 = fmap (apply s1) s2 <> s1
 
 class Substitutable a where
     apply :: Subst -> a -> a
     ftv :: a -> Set TVar
 
 instance Substitutable Type where
-    apply (Subst m) t@(TVar v) = M.findWithDefault t v m
-    apply s (TFun ts t)        = TFun (apply s ts) (apply s t)
-    apply s (TMany ts)         = TMany (apply s ts)
-    apply _ t                  = t
+    apply m t@(TVar v)  = M.findWithDefault t v m
+    apply s (TFun ts t) = TFun (apply s ts) (apply s t)
+    apply s (TMany ts)  = TMany (apply s ts)
+    apply _ t           = t
 
     ftv (TVar t)    = [t]
     ftv (TFun ts t) = ftv ts <> ftv t
@@ -67,8 +65,8 @@ instance Substitutable Type where
     ftv _           = mempty
 
 instance Substitutable Scheme where
-    apply (Subst m) (Forall vs t) = Forall vs (apply (Subst (foldr M.delete m vs)) t)
-    ftv (Forall vs t) = ftv t \\ vs
+    apply m (Forall vs t) = Forall vs (apply (foldr M.delete m vs) t)
+    ftv (Forall vs t)     = ftv t \\ vs
 
 instance Substitutable TypeEnv where
     apply = fmap . apply
@@ -146,20 +144,20 @@ type Constraint = (Type, Type)
 instantiate :: MonadInfer m => Scheme -> m Type
 instantiate (Forall (S.toList -> vs) t) = do
     vs' <- mapM (const freshType) vs
-    pure $ apply (Subst (M.fromList (zip vs vs'))) t
+    pure $ apply (M.fromList (zip vs vs')) t
 
 generalize :: MonadInfer m => Type -> m Scheme
 generalize t = do
     env <- getEnv
     pure $ Forall (ftv t \\ ftv env) t
 
-infer :: TypeEnv -> Block a -> Either TypeError Scheme
+infer :: Show a => TypeEnv -> Block a -> Either TypeError Type
 infer env block = do
     (t, cs) <- runInferBlock (inferBlock block)
     s <- constraintSolver mempty cs
     pure . closeOver $ apply s t
 
-inferBlock :: Block a -> InferBlock Type
+inferBlock :: Show a => Block a -> InferBlock Type
 inferBlock (Block _ ss mr) = do
     (_, (_, ts)) <- listen (mapM_ inferStmt ss)
     case mr of
@@ -197,9 +195,9 @@ inferBlock (Block _ ss mr) = do
     mapInit f [x]    = [x]
     mapInit f (x:xs) = f x : mapInit f xs
 
-inferStmt :: Statement a -> InferBlock ()
+inferStmt :: Show a => Statement a -> InferBlock ()
 inferStmt (EmptyStmt _) = pure ()
-inferStmt (Assign _ (VariableList1 _ vs) (ExpressionList1 _ es)) = do
+inferStmt s@(Assign _ (VariableList1 _ vs) (ExpressionList1 _ es)) = do
     f <- go (NE.toList vs) (NE.toList es)
     _1 %= f
   where
@@ -330,7 +328,7 @@ constraintSolver :: Subst -> [Constraint] -> Solve Subst
 constraintSolver s [] = pure s
 constraintSolver s ((t1,t2):cs) = do
     s' <- unifies t1 t2
-    constraintSolver (s' <> s) (apply s' cs)
+    constraintSolver (s' `composeSubst` s) (apply s' cs)
 
 unifies :: Type -> Type -> Solve Subst
 unifies t1 t2 | t1 == t2 = pure mempty
@@ -348,12 +346,12 @@ unifiesList [] [] = pure mempty
 unifiesList (x:xs) (y:ys) = do
     s1 <- unifies x y
     s2 <- unifiesList (apply s1 xs) (apply s1 ys)
-    pure $ s2 <> s1
+    pure $ s2 `composeSubst` s1
 unifiesList _ _ = error "unifiesList: precondition violated"
 
 bind :: TVar -> Type -> Solve Subst
 bind v t | occursCheck v t = throwError $ InfiniteType v t
-         | otherwise = pure $ Subst (M.singleton v t)
+         | otherwise = pure (M.singleton v t)
 
 occursCheck :: Substitutable a => TVar -> a -> Bool
 occursCheck v s = v `S.member` ftv s
