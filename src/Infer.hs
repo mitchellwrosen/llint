@@ -316,9 +316,51 @@ inferStmt (Assign _ (VariableList1 _ vs) (ExpressionList1 _ es)) = do
 
     allNil :: [Variable a] -> InferBlock [(Var, Type)]
     allNil vs = mapM (\x -> ((x,) . TNullable) <$> freshType) [x | VarIdent _ (Ident _ x) <- vs] -- TODO: Other variables
+inferStmt (FunCall _ _) = undefined
+inferStmt (Label _ _) = undefined
+inferStmt (Break _) = undefined
+inferStmt (Goto _ _) = undefined
+inferStmt (Do _ block) = do
+    enterBlock
+    _ <- inferBlock block
+    doBlockGlobalEnv <- exitBlock
+    localEnv <- use inferBlockLocalEnv
+    -- Any global writes inside the do-block that were references to the outer
+    -- block's locals simply overwrite them.
+    inferBlockLocalEnv .= (doBlockGlobalEnv `M.intersection` localEnv) <> localEnv
+    -- Any global writes inside the do-block that were not references to the
+    -- outer block's locals were either updates to old global variables, or
+    -- new global variables.
+    let newGlobals = doBlockGlobalEnv `M.difference` localEnv
+    inferBlockGlobalEnv %= (newGlobals <>)
+inferStmt (While _ _ _) = undefined
+inferStmt (Repeat _ _ _) = undefined
+inferStmt (If _ _ _) = undefined
+inferStmt (For _ _ _ _ _ _) = undefined
+inferStmt (ForIn _ _ _ _) = undefined
+inferStmt (FunAssign _ _ _) = undefined
+inferStmt (LocalFunAssign _ _ _) = undefined
+inferStmt (LocalAssign _ _ _) = undefined
 
-inferStmt (Do _ block) = () <$ inferBlock block
-inferStmt _ = error "inferStmt: TODO"
+-- Enter a new block. Push the current local/global environments onto the stack,
+-- empty the local environment, and left-merge the local environment with the
+-- global environment to form the new local.
+enterBlock :: InferBlock ()
+enterBlock = modify f
+  where
+    f :: InferBlockState -> InferBlockState
+    f (InferBlockState localEnv globalEnv envStack tvarSupply) =
+        InferBlockState mempty (localEnv <> globalEnv) ((localEnv, globalEnv) : envStack) tvarSupply
+
+-- Exit a block. Restore the old local and global environments, and return the
+-- block's global environment for the calling code to merge in (this is because
+-- the merge strategy will change depending on if the block was entered
+-- conditionally or unconditionally).
+exitBlock :: InferBlock TypeEnv
+exitBlock = do
+    InferBlockState _ globalEnv ((oldLocalEnv, oldGlobalEnv) : envStack) tvarSupply <- get
+    put $ InferBlockState oldLocalEnv oldGlobalEnv envStack tvarSupply
+    pure globalEnv
 
 inferExpr :: MonadInfer m => Expression a -> m Type
 inferExpr (Nil _) = TNullable <$> freshType
