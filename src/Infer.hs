@@ -410,8 +410,8 @@ constraintSolver s (c:cs) = do
             (_, s') <- unify t1 t2
             constraintSolver (s' `composeSubst` s) (apply s' cs)
         Union tv ts -> do
-            (t3, s') <- union mempty ts
-            (_, s'') <- unify (TVar tv) t3
+            (u, s') <- union mempty ts
+            (_, s'') <- unify (TVar tv) u
             constraintSolver (s'' `composeSubst` s' `composeSubst` s) (apply s' cs)
   where
     union :: Subst -> [Type] -> Solve (Type, Subst)
@@ -419,7 +419,7 @@ constraintSolver s (c:cs) = do
     union s [t] = pure (t, s)
     union s (t1:t2:ts) = do
         (t3, s')  <- unify t1 t2
-        union (s' `composeSubst` s) (apply s' (t2:ts))
+        union (s' `composeSubst` s) (apply s' (t3:ts))
 
 unify :: Type -> Type -> Solve (Type, Subst)
 unify t1 t2 | t1 == t2 = pure (t1, mempty)
