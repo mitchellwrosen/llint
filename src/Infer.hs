@@ -219,7 +219,6 @@ inferBlock (Block _ ss mr) = do
     -- and return the unified type.
     go :: [Type] -> Type -> InferBlock Type
     go ts t = do
-        returnsType t
         case ts of
             [] -> pure t
             _  -> do
@@ -237,7 +236,7 @@ inferStmt :: Statement a -> InferBlock ()
 inferStmt (EmptyStmt _) = pure ()
 inferStmt (Assign _ (VariableList1 _ vs) (ExpressionList1 _ es)) = do
     newVars <- go (NE.toList vs) (NE.toList es)
-    localEnv  <- use inferBlockLocalEnv
+    localEnv <- use inferBlockLocalEnv
     forM_ newVars $ \(v, t) -> do
         s <- generalize t
         case M.lookup v localEnv of
@@ -246,6 +245,10 @@ inferStmt (Assign _ (VariableList1 _ vs) (ExpressionList1 _ es)) = do
   where
     -- Perform type inference on the expressions and build up a list of
     -- inferrred types to apply to the appropriate environment after the fact.
+    --
+    -- NOTE: Any bug fixes/refactorings here should be replicated below in the
+    -- LocalAssign statement, which is a strictly simpler function (it's as if
+    -- all Variables are VarIdents).
     go :: [Variable a] -> [Expression a] -> InferBlock [(Var, Type)]
     -- We ran out of variables to assign to, as in the statement
     --
@@ -254,6 +257,7 @@ inferStmt (Assign _ (VariableList1 _ vs) (ExpressionList1 _ es)) = do
     -- Simply infer the types of the unused expressions (we still want to write
     -- constraints and throw type errors), and toss the results.
     go [] es = [] <$ mapM_ inferExpr es
+    go vs [] = allNil vs
     -- One expression is being assigned to one or more variables. Graft the
     -- result type over the list.
     go vs [e] = do
@@ -340,7 +344,32 @@ inferStmt (For _ _ _ _ _ _) = undefined
 inferStmt (ForIn _ _ _ _) = undefined
 inferStmt (FunAssign _ _ _) = undefined
 inferStmt (LocalFunAssign _ _ _) = undefined
-inferStmt (LocalAssign _ _ _) = undefined
+inferStmt (LocalAssign _ (IdentList1 _ is) (ExpressionList _ es)) = do
+    newVars <- go (NE.toList is) es
+    forM_ newVars $ \(v, t) -> do
+        s <- generalize t
+        inferBlockLocalEnv %= M.insert v s
+  where
+    -- These functions are very similar to the ones that work on Variables in an
+    -- Assign statement, but we can't really share code (different types).
+    go :: [Ident a] -> [Expression a] -> InferBlock [(Var, Type)]
+    go [] es = [] <$ mapM_ inferExpr es
+    go xs [] = allNil xs
+    go xs [e] = do
+        t <- inferExpr e
+        graft t xs
+    go ((Ident _ x):xs) (e:es) = do
+        t <- adjustManyToOne <$> inferExpr e
+        ((x, t) :) <$> go xs es
+
+    graft :: Type -> [Ident a] -> InferBlock [(Var, Type)]
+    graft _ [] = pure []
+    graft (TMany (t:ts)) ((Ident _ x):xs) = ((x, t) :) <$> graft (TMany ts) xs
+    graft (TMany []) xs = allNil xs
+    graft t ((Ident _ x):xs) = ((x, t) :) <$> allNil xs
+
+    allNil :: [Ident a] -> InferBlock [(Var, Type)]
+    allNil = mapM (\(Ident _ x) -> ((x,) . TNullable) <$> freshType)
 
 -- Enter a new block. Push the current local/global environments onto the stack,
 -- empty the local environment, and left-merge the local environment with the
