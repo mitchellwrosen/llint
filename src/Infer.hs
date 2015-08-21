@@ -238,7 +238,7 @@ inferStmt (Assign _ (VariableList1 _ vs) (ExpressionList1 _ es)) = do
     newVars <- go (NE.toList vs) (NE.toList es)
     localEnv <- use inferBlockLocalEnv
     forM_ newVars $ \(v, t) -> do
-        s <- generalize t
+        let s = Forall [] t
         case M.lookup v localEnv of
             Just _  -> inferBlockLocalEnv  .= M.insert v s localEnv
             Nothing -> inferBlockGlobalEnv %= M.insert v s
@@ -335,20 +335,64 @@ inferStmt (Do _ block) = do
     -- Any global writes inside the do-block that were not references to the
     -- outer block's locals were either updates to old global variables, or
     -- new global variables.
-    let newGlobals = doBlockGlobalEnv `M.difference` localEnv
-    inferBlockGlobalEnv %= (newGlobals <>)
+    let newOrExistingGlobals = doBlockGlobalEnv `M.difference` localEnv
+    inferBlockGlobalEnv %= (newOrExistingGlobals <>)
 inferStmt (While _ _ _) = undefined
 inferStmt (Repeat _ _ _) = undefined
-inferStmt (If _ _ _) = undefined
+inferStmt (If _ exprBlocks mb) = do
+    go (NE.toList exprBlocks)
+    maybe (pure ()) go' mb
+  where
+    go :: [(Expression a, Block a)] -> InferBlock ()
+    go [] = pure ()
+    go ((e,b):ebs) = do
+        t <- inferExpr e
+        constraint (Equal t TBool)
+
+        go' b
+        go ebs
+
+    go' :: Block a -> InferBlock ()
+    go' b = do
+        enterBlock
+        _ <- inferBlock b
+        ifBlockGlobalEnv <- exitBlock
+        localEnv <- use inferBlockLocalEnv
+        globalEnv <- use inferBlockGlobalEnv
+
+        -- Any global writes inside the if-block that were references to the
+        -- outer block's locals must unify with them.
+        unifyMismatchedSchemes inferBlockLocalEnv localEnv ifBlockGlobalEnv
+
+        -- Any global writes inside the if-block that were references to the
+        -- outer block's globals must unify with them.
+        unifyMismatchedSchemes inferBlockGlobalEnv globalEnv ifBlockGlobalEnv
+
+        -- Any global writes inside the if-block that were simply new globals
+        -- must be added to the outer global env.
+        let newGlobals = ifBlockGlobalEnv `M.difference` localEnv `M.difference` globalEnv
+        inferBlockGlobalEnv %= (newGlobals <>)
+
+    unifyMismatchedSchemes :: Lens' InferBlockState TypeEnv -> TypeEnv -> TypeEnv -> InferBlock ()
+    unifyMismatchedSchemes l env1 env2 = do
+        let env :: [(Var, (Scheme, Scheme))]
+            env = M.toList $ M.intersectionWith (,) env1 env2
+
+        forM_ env $ \(v, (s1, s2)) ->
+            unless (s1 == s2) $ do
+                t1 <- instantiate s1
+                t2 <- instantiate s2
+                TVar tv <- freshType
+                constraint (Union tv [t1, t2])
+                l %= M.insert v (Forall [] (TVar tv))
+
 inferStmt (For _ _ _ _ _ _) = undefined
 inferStmt (ForIn _ _ _ _) = undefined
 inferStmt (FunAssign _ _ _) = undefined
 inferStmt (LocalFunAssign _ _ _) = undefined
 inferStmt (LocalAssign _ (IdentList1 _ is) (ExpressionList _ es)) = do
     newVars <- go (NE.toList is) es
-    forM_ newVars $ \(v, t) -> do
-        s <- generalize t
-        inferBlockLocalEnv %= M.insert v s
+    forM_ newVars $ \(v, t) -> inferBlockLocalEnv %= M.insert v (Forall [] t)
   where
     -- These functions are very similar to the ones that work on Variables in an
     -- Assign statement, but we can't really share code (different types).
@@ -439,9 +483,10 @@ constraintSolver s (c:cs) = do
             (_, s') <- unify t1 t2
             constraintSolver (s' `composeSubst` s) (apply s' cs)
         Union tv ts -> do
-            (u, s') <- union mempty ts
-            (_, s'') <- unify (TVar tv) u
-            constraintSolver (s'' `composeSubst` s' `composeSubst` s) (apply s' cs)
+            (u, s1) <- union mempty ts
+            (_, s2) <- unify (TVar tv) u
+            let s3 = s2 `composeSubst` s1
+            constraintSolver (s3 `composeSubst` s) (apply s3 cs)
   where
     union :: Subst -> [Type] -> Solve (Type, Subst)
     union _ [] = error "union: empty list"
