@@ -33,7 +33,8 @@ data Type
     | TFloat
     | TBool
     | TString
-    | TNil
+    | TNullable Type
+    | TNonNullable Type
     deriving (Eq, Ord, Show)
 
 data Scheme = Forall (Set TVar) Type
@@ -60,15 +61,19 @@ class Substitutable a where
     ftv :: a -> Set TVar
 
 instance Substitutable Type where
-    apply m t@(TVar v)  = M.findWithDefault t v m
-    apply s (TFun ts t) = TFun (apply s ts) (apply s t)
-    apply s (TMany ts)  = TMany (apply s ts)
-    apply _ t           = t
+    apply m t@(TVar v)       = M.findWithDefault t v m
+    apply s (TFun ts t)      = TFun (apply s ts) (apply s t)
+    apply s (TMany ts)       = TMany (apply s ts)
+    apply s (TNullable t)    = TNullable (apply s t)
+    apply s (TNonNullable t) = TNonNullable (apply s t)
+    apply _ t                = t
 
-    ftv (TVar t)    = [t]
-    ftv (TFun ts t) = ftv ts <> ftv t
-    ftv (TMany ts)  = ftv ts
-    ftv _           = mempty
+    ftv (TVar t)         = [t]
+    ftv (TFun ts t)      = ftv ts <> ftv t
+    ftv (TMany ts)       = ftv ts
+    ftv (TNullable t)    = ftv t
+    ftv (TNonNullable t) = ftv t
+    ftv _                = mempty
 
 instance Substitutable Scheme where
     apply m (Forall vs t) = Forall vs (apply (foldr M.delete m vs) t)
@@ -78,13 +83,16 @@ instance Substitutable TypeEnv where
     apply = fmap . apply
     ftv = ftv . M.elems
 
+instance Substitutable Constraint where
+    apply s (Equal t1 t2) = Equal (apply s t1) (apply s t2)
+    apply s (Union tv ts) = Union tv (apply s ts)
+
+    ftv (Equal t1 t2) = ftv t1 <> ftv t2
+    ftv (Union tv ts) = [tv] <> ftv ts
+
 instance Substitutable a => Substitutable [a] where
     apply = fmap . apply
     ftv = foldMap ftv
-
-instance (Substitutable a, Substitutable b) => Substitutable (a, b) where
-    apply s (t1, t2) = (apply s t1, apply s t2)
-    ftv (t1, t2) = ftv t1 <> ftv t2
 
 --------------------------------------------------------------------------------
 -- Inference
@@ -92,7 +100,7 @@ instance (Substitutable a, Substitutable b) => Substitutable (a, b) where
 class MonadError TypeError m => MonadInfer m where
     freshType :: m Type
     getEnv :: m TypeEnv
-    unify :: Type -> Type -> m ()
+    constraint :: Constraint -> m ()
 
 -- Expression inference monad.
 -- * Read-only type environment
@@ -110,7 +118,7 @@ instance MonadInfer InferExpr where
 
     getEnv = ask
 
-    unify t1 t2 = tell [(t1, t2)]
+    constraint = tell . pure
 
 runInferExpr :: InferExpr a -> Either TypeError (a, [Constraint])
 runInferExpr m = evalRWST (unInferExpr m) mempty tvarSupply
@@ -127,28 +135,38 @@ newtype InferBlock a = InferBlock { unInferBlock :: WriterT ([Constraint], [Type
 
 instance MonadInfer InferBlock where
     freshType = do
-        InferBlockState localEnvs globalEnv (s:ss) <- get
-        put $ InferBlockState localEnvs globalEnv ss
+        InferBlockState localEnv globalEnv envs (s:ss) <- get
+        put $ InferBlockState localEnv globalEnv envs ss
         pure (TVar s)
 
     -- Left-biased type environment due to shadowing.
     getEnv = do
-        InferBlockState locals globals _ <- get
-        pure $ mconcat locals <> globals
+        InferBlockState localEnv globalEnv _ _ <- get
+        pure $ localEnv <> globalEnv
 
-    unify t1 t2 = tell ([(t1, t2)], [])
+    constraint c = tell ([c], [])
 
 data InferBlockState = InferBlockState
-    { inferBlockLocalEnvs  :: [TypeEnv]
-    , inferBlockGlobalEnv  :: TypeEnv
+    { _inferBlockLocalEnv  :: TypeEnv
+    , _inferBlockGlobalEnv :: TypeEnv
+    , _inferBlockEnvStack  :: [(TypeEnv, TypeEnv)] -- [(Local, Global)]
     , inferBlockTVarSupply :: TVarSupply
     }
 
+inferBlockLocalEnv :: Lens' InferBlockState TypeEnv
+inferBlockLocalEnv = lens (\(InferBlockState a _ _ _) -> a) (\(InferBlockState _ b c d) a -> InferBlockState a b c d)
+
+inferBlockGlobalEnv :: Lens' InferBlockState TypeEnv
+inferBlockGlobalEnv = lens (\(InferBlockState _ b _ _) -> b) (\(InferBlockState a _ c d) b -> InferBlockState a b c d)
+
+inferBlockEnvStack :: Lens' InferBlockState [(TypeEnv, TypeEnv)]
+inferBlockEnvStack = lens (\(InferBlockState _ _ c _) -> c) (\(InferBlockState a b _ d) c -> InferBlockState a b c d)
+
 runInferBlock :: InferBlock a -> Either TypeError (a, [Constraint])
-runInferBlock m = (\((a, (cs, _)), _) -> (a, cs)) <$> runStateT (runWriterT (unInferBlock m)) initState
+runInferBlock m = (\(a, (cs, _)) -> (a, cs)) <$> evalStateT (runWriterT (unInferBlock m)) initState
   where
     initState :: InferBlockState
-    initState = InferBlockState [] mempty tvarSupply
+    initState = InferBlockState mempty mempty [] tvarSupply
 
 returnsType :: Type -> InferBlock ()
 returnsType t = tell ([], [t])
@@ -158,7 +176,10 @@ type TVarSupply = [TVar]
 tvarSupply :: TVarSupply
 tvarSupply = [1..] >>= flip replicateM ['a'..'z']
 
-type Constraint = (Type, Type)
+data Constraint
+    = Equal Type Type
+    | Union TVar [Type]
+    deriving Show
 
 instantiate :: MonadInfer m => Scheme -> m Type
 instantiate (Forall (S.toList -> vs) t) = do
@@ -180,10 +201,10 @@ inferBlock :: Block a -> InferBlock Type
 inferBlock (Block _ ss mr) = do
     (_, (_, ts)) <- listen (mapM_ inferStmt ss)
     case mr of
-        Nothing -> go ts TNil
+        Nothing -> freshType >>= go ts . TNullable
         Just (ReturnStatement _ (ExpressionList _ es)) ->
             case es of
-                [] -> go ts TNil
+                [] -> freshType >>= go ts . TNullable
                 [e] -> inferExpr e >>= go ts
                 -- Multiple return statements, as in
                 --
@@ -199,14 +220,12 @@ inferBlock (Block _ ss mr) = do
     go :: [Type] -> Type -> InferBlock Type
     go ts t = do
         returnsType t
-        tv <- freshType
-        mapM_ (uncurry unify) (pairs (tv:t:ts))
-        pure tv
-
-    pairs :: [a] -> [(a, a)]
-    pairs []     = []
-    pairs [x]    = []
-    pairs (x:xs) = map (x,) xs ++ pairs xs
+        case ts of
+            [] -> pure t
+            _  -> do
+                TVar tv <- freshType
+                constraint (Union tv (ts ++ [t]))
+                pure (TVar tv)
 
     -- Map over the init of a list (every element but the last)
     mapInit :: (a -> a) -> [a] -> [a]
@@ -218,25 +237,12 @@ inferStmt :: Statement a -> InferBlock ()
 inferStmt (EmptyStmt _) = pure ()
 inferStmt (Assign _ (VariableList1 _ vs) (ExpressionList1 _ es)) = do
     newVars <- go (NE.toList vs) (NE.toList es)
-    localEnvs <- gets inferBlockLocalEnvs
+    localEnv  <- use inferBlockLocalEnv
     forM_ newVars $ \(v, t) -> do
-        (localEnvs', wasInserted) <- insertLocal v t localEnvs
-        if wasInserted
-            then modify (\(InferBlockState _ y z) -> InferBlockState localEnvs' y z)
-            else do
-                globalEnv <- gets inferBlockGlobalEnv
-                case M.lookup v globalEnv of
-                    Just s -> do
-                        t' <- instantiate s
-                        tv <- freshType
-                        unify t tv
-                        unify t' tv
-                        let globalEnv' = M.insert v (Forall [] tv) globalEnv
-                        modify (\(InferBlockState x _ z) -> InferBlockState x globalEnv' z)
-                    Nothing -> do
-                        s <- generalize t
-                        let globalEnv' = M.insert v s globalEnv
-                        modify (\(InferBlockState x _ z) -> InferBlockState x globalEnv' z)
+        s <- generalize t
+        case M.lookup v localEnv of
+            Just _  -> inferBlockLocalEnv  .= M.insert v s localEnv
+            Nothing -> inferBlockGlobalEnv %= M.insert v s
   where
     -- Perform type inference on the expressions and build up a list of
     -- inferrred types to apply to the appropriate environment after the fact.
@@ -252,7 +258,7 @@ inferStmt (Assign _ (VariableList1 _ vs) (ExpressionList1 _ es)) = do
     -- result type over the list.
     go vs [e] = do
         t <- inferExpr e
-        pure (graft t vs)
+        graft t vs
     -- More than one expression is being assigned to one or more variables;
     -- therefore, if the expression returns multiple values, it gets adjusted
     -- to only return the first.
@@ -279,16 +285,16 @@ inferStmt (Assign _ (VariableList1 _ vs) (ExpressionList1 _ es)) = do
     --
     -- When the type is not a TMany, assign it to the first variable. All
     -- remaining variables are nil.
-    graft :: Type -> [Variable a] -> [(Var, Type)]
+    graft :: Type -> [Variable a] -> InferBlock [(Var, Type)]
     -- We ran out of variables, as in
     --
     --     x, y = f()
     --
     -- where f() returns three values. Just toss the remaining types.
-    graft _ [] = []
+    graft _ [] = pure []
     graft (TMany (t:ts)) (v:vs) =
         case v of
-            VarIdent _ (Ident _ x) -> (x, t) : graft (TMany ts) vs
+            VarIdent _ (Ident _ x) -> ((x, t) :) <$> graft (TMany ts) vs
             -- TODO: Other variables
             _ -> graft (TMany ts) vs
     -- We ran out of types to assign, as in
@@ -304,36 +310,18 @@ inferStmt (Assign _ (VariableList1 _ vs) (ExpressionList1 _ es)) = do
     -- Assign the type to the first. All remaining variables are nil.
     graft t (v:vs) = do
         case v of
-            VarIdent _ (Ident _ x) -> (x, t) : allNil vs
+            VarIdent _ (Ident _ x) -> ((x, t) :) <$> allNil vs
             -- TODO: Other variables
             _ -> allNil vs
 
-    allNil :: [Variable a] -> [(Var, Type)]
-    allNil vs = map (, TNil) [x | VarIdent _ (Ident _ x) <- vs] -- TODO: Other variables
+    allNil :: [Variable a] -> InferBlock [(Var, Type)]
+    allNil vs = mapM (\x -> ((x,) . TNullable) <$> freshType) [x | VarIdent _ (Ident _ x) <- vs] -- TODO: Other variables
 
-    -- Look for the given variable in all local environments; if found,
-    -- unify with the existing type and re-insert. Returns the (possibly)
-    -- modified stack of local environments, and whether or not any
-    -- modification took place.
-    insertLocal :: Var -> Type -> [TypeEnv] -> InferBlock ([TypeEnv], Bool)
-    insertLocal = insertLocal' []
-      where
-        insertLocal' :: [TypeEnv] -> Var -> Type -> [TypeEnv] -> InferBlock ([TypeEnv], Bool)
-        insertLocal' acc _ _ [] = pure (reverse acc, False)
-        insertLocal' acc v t (env:envs) = do
-            case M.lookup v env of
-                Just s -> do
-                    t' <- instantiate s
-                    tv <- freshType
-                    unify t tv
-                    unify t' tv
-                    let env' = M.insert v (Forall [] tv) env
-                    pure (reverse acc ++ [env'] ++ envs, True)
-                Nothing -> insertLocal' (env:acc) v t envs
+inferStmt (Do _ block) = () <$ inferBlock block
 inferStmt _ = error "inferStmt: TODO"
 
 inferExpr :: MonadInfer m => Expression a -> m Type
-inferExpr (Nil _) = pure TNil
+inferExpr (Nil _) = TNullable <$> freshType
 inferExpr (Bool _ _) = pure TBool
 inferExpr (Integer _ _) = pure TFloat
 inferExpr (Float _ _) = pure TFloat
@@ -355,10 +343,12 @@ closeOver t = Forall (S.fromList $ M.elems m) (f t)
     m = M.fromList $ zip (S.toList $ ftv t) tvarSupply
 
     f :: Type -> Type
-    f (TVar v)    = TVar (m M.! v)
-    f (TFun ts t) = TFun (map f ts) (f t)
-    f (TMany ts)  = TMany (map f ts)
-    f t           = t
+    f (TVar v)         = TVar (m M.! v)
+    f (TFun ts t)      = TFun (map f ts) (f t)
+    f (TMany ts)       = TMany (map f ts)
+    f (TNullable t)    = TNullable (f t)
+    f (TNonNullable t) = TNonNullable (f t)
+    f t                = t
 
 -- In many contexts, multiple return values are adjusted to only the first.
 adjustManyToOne :: Type -> Type
@@ -372,32 +362,52 @@ type Solve a = Either TypeError a
 
 constraintSolver :: Subst -> [Constraint] -> Solve Subst
 constraintSolver s [] = pure s
-constraintSolver s ((t1,t2):cs) = do
-    s' <- unifies t1 t2
-    constraintSolver (s' `composeSubst` s) (apply s' cs)
+constraintSolver s (c:cs) = do
+    case c of
+        Equal t1 t2 -> do
+            (_, s') <- unify t1 t2
+            constraintSolver (s' `composeSubst` s) (apply s' cs)
+        Union tv ts -> do
+            (t3, s') <- union mempty ts
+            (_, s'') <- unify (TVar tv) t3
+            constraintSolver (s'' `composeSubst` s' `composeSubst` s) (apply s' cs)
+  where
+    union :: Subst -> [Type] -> Solve (Type, Subst)
+    union _ [] = error "union: empty list"
+    union s [t] = pure (t, s)
+    union s (t1:t2:ts) = do
+        (t3, s')  <- unify t1 t2
+        union (s' `composeSubst` s) (apply s' (t2:ts))
 
-unifies :: Type -> Type -> Solve Subst
-unifies t1 t2 | t1 == t2 = pure mempty
-unifies (TVar v) t = v `bind` t
-unifies t (TVar v) = v `bind` t
-unifies (TFun xs x) (TFun ys y)
-    | length xs == length ys = unifiesList (xs ++ [x]) (ys ++ [y])
-unifies (TMany xs) (TMany ys)
-    | length xs == length ys = unifiesList xs ys
-unifies t1 t2 = throwError $ UnificationFail t1 t2
+unify :: Type -> Type -> Solve (Type, Subst)
+unify t1 t2 | t1 == t2 = pure (t1, mempty)
+unify (TVar v) t = (t,) <$> bindVar v t
+unify t (TVar v) = (t,) <$> bindVar v t
+unify (TNullable (TNonNullable t1)) t2 = unify t1 t2
+unify t1 (TNullable (TNonNullable t2)) = unify t1 t2
+unify (TNullable t1) t2 = (_1 %~ TNullable) <$> unify t1 t2
+unify t1 (TNullable t2) = (_1 %~ TNullable) <$> unify t1 t2
+-- unify (TFun xs x) (TFun ys y) | length xs == length ys = do
+--     (ts, s1) <- unifiesList xs ys -- unifiesList (xs ++ [x]) (ys ++ [y])
+--     (t,  s2) <- unify (apply s1 x) (apply s1 y)
+--     pure (TFun ts t, s2 `composeSubst` s1)
+-- unify (TMany xs) (TMany ys) = error "todo" -- unifiesList xs ys -- TODO fill with TNil
+unify t1 t2 = throwError $ UnificationFail t1 t2
 
--- Precondition: lists are same length
-unifiesList :: [Type] -> [Type] -> Solve Subst
-unifiesList [] [] = pure mempty
-unifiesList (x:xs) (y:ys) = do
-    s1 <- unifies x y
-    s2 <- unifiesList (apply s1 xs) (apply s1 ys)
-    pure $ s2 `composeSubst` s1
-unifiesList _ _ = error "unifiesList: precondition violated"
+-- Precondition: lists are the same length
+-- unifyList :: [Type] -> [Type] -> Solve ([Type], Subst)
+-- unifyList [] [] = pure mempty
+-- unifyList (x:xs) (y:ys) = do
+--     (t,  s1) <- unify x y
+--     (ts, s2) <- unifiesList (apply s1 xs) (apply s1 ys)
+--     pure ((t:ts), s2 `composeSubst` s1)
+-- unifyList _ _ = error "unifiesList: precondition violated"
 
-bind :: TVar -> Type -> Solve Subst
-bind v t | occursCheck v t = throwError $ InfiniteType v t
-         | otherwise = pure (M.singleton v t)
+bindVar :: TVar -> Type -> Solve Subst
+bindVar v t = do
+    when (occursCheck v t) $
+        throwError $ InfiniteType v t
+    pure (M.singleton v t)
 
 occursCheck :: Substitutable a => TVar -> a -> Bool
 occursCheck v s = v `S.member` ftv s
@@ -405,6 +415,13 @@ occursCheck v s = v `S.member` ftv s
 --------------------------------------------------------------------------------
 -- Misc. extras
 
-infixl 4 %=
+use :: MonadState s m => Lens' s a -> m a
+use l = (^.l) <$> get
+
+infix 4 .=
+(.=) :: MonadState s m => Lens' s a -> a -> m ()
+l .= x = modify (l .~ x)
+
+infix 4 %=
 (%=) :: MonadState s m => Lens' s a -> (a -> a) -> m ()
 l %= f = modify (l %~ f)
