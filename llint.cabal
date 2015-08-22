@@ -34,6 +34,7 @@ library
                      , OverloadedLists
                      , OverloadedStrings
                      , RankNTypes
+                     , ScopedTypeVariables
                      , TupleSections
                      , ViewPatterns
   ghc-options:        -Wall

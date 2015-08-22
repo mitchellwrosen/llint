@@ -191,6 +191,13 @@ generalize t = do
     env <- getEnv
     pure $ Forall (ftv t \\ ftv env) t
 
+-- | Return the type scheme of the union of the given types.
+unionScheme :: [Type] -> InferBlock Scheme
+unionScheme ts = do
+    TVar tv <- freshType
+    constraint (Union tv ts)
+    pure $ Forall [] (TVar tv)
+
 infer :: TypeEnv -> Block a -> Either TypeError Scheme
 infer env block = do
     (t, cs) <- runInferBlock (inferBlock block)
@@ -339,52 +346,83 @@ inferStmt (Do _ block) = do
     inferBlockGlobalEnv %= (newOrExistingGlobals <>)
 inferStmt (While _ _ _) = undefined
 inferStmt (Repeat _ _ _) = undefined
-inferStmt (If _ exprBlocks mb) = do
-    go (NE.toList exprBlocks)
-    maybe (pure ()) go' mb
+inferStmt (If _ ebs mb) = do
+    localEnv <- use inferBlockLocalEnv
+    globalEnv <- use inferBlockGlobalEnv
+
+    -- Make a mapping from var to all schemes resulting from the inference
+    -- performed on each branch in isolation.
+    ifEnvs :: Map Var [Scheme] <- do
+        env1 <- forM (NE.toList ebs) $ \(e, b) -> do
+                  t <- inferExpr e
+                  constraint (Equal t TBool)
+                  inferInnerBlock b
+        env2 <- maybe (pure (localEnv <> globalEnv)) inferInnerBlock mb
+
+        pure $ foldr (M.unionWith (++) . fmap pure) mempty (env1 ++ [env2])
+
+    forM_ (M.toList ifEnvs) $ \(v, ss) -> do
+        case (M.lookup v localEnv, M.lookup v globalEnv, length ss == length ebs + 1) of
+            -- Overwriting an old local, as in
+            --
+            --     local x = 5
+            --     if foo() then
+            --         x = "hi"
+            --     else
+            --         x = "hey"
+            --     end
+            (Just _, _, _) -> overwriteLocal v ss
+
+            -- Overwriting an old global, or writing a new global that was
+            -- mentioned in every branch, as in
+            --
+            --     y = 5
+            --     if foo() then
+            --         y = 6
+            --     else
+            --         bar()
+            --     end
+            --
+            -- or
+            --
+            --     if foo() then
+            --         y = 6
+            --     elseif bar() then
+            --         y = 7
+            --     else
+            --         y = 8
+            --     end
+            --
+            (_, Just _, _)    -> overwriteGlobal v ss
+            (_, _,      True) -> overwriteGlobal v ss
+
+            -- Writing a new global that was not mentioned in every branch, as in
+            --
+            --     if foo() then
+            --         y = 6
+            --     else
+            --         bar()
+            --     end
+            --
+            -- This is similar to overwriting a global, but we sneak in an extra
+            -- nullable type to union with (to capture the fact that the global
+            -- may me nil in the outer block).
+            _ -> do
+                t  <- TNullable <$> freshType
+                ts <- mapM instantiate ss
+                s  <- unionScheme (t:ts)
+                inferBlockGlobalEnv %= M.insert v s
   where
-    go :: [(Expression a, Block a)] -> InferBlock ()
-    go [] = pure ()
-    go ((e,b):ebs) = do
-        t <- inferExpr e
-        constraint (Equal t TBool)
+    overwriteLocal :: Var -> [Scheme] -> InferBlock ()
+    overwriteLocal = overwriteVar inferBlockLocalEnv
 
-        go' b
-        go ebs
+    overwriteGlobal :: Var -> [Scheme] -> InferBlock ()
+    overwriteGlobal = overwriteVar inferBlockGlobalEnv
 
-    go' :: Block a -> InferBlock ()
-    go' b = do
-        enterBlock
-        _ <- inferBlock b
-        ifBlockGlobalEnv <- exitBlock
-        localEnv <- use inferBlockLocalEnv
-        globalEnv <- use inferBlockGlobalEnv
-
-        -- Any global writes inside the if-block that were references to the
-        -- outer block's locals must unify with them.
-        unifyMismatchedSchemes inferBlockLocalEnv localEnv ifBlockGlobalEnv
-
-        -- Any global writes inside the if-block that were references to the
-        -- outer block's globals must unify with them.
-        unifyMismatchedSchemes inferBlockGlobalEnv globalEnv ifBlockGlobalEnv
-
-        -- Any global writes inside the if-block that were simply new globals
-        -- must be added to the outer global env.
-        let newGlobals = ifBlockGlobalEnv `M.difference` localEnv `M.difference` globalEnv
-        inferBlockGlobalEnv %= (newGlobals <>)
-
-    unifyMismatchedSchemes :: Lens' InferBlockState TypeEnv -> TypeEnv -> TypeEnv -> InferBlock ()
-    unifyMismatchedSchemes l env1 env2 = do
-        let env :: [(Var, (Scheme, Scheme))]
-            env = M.toList $ M.intersectionWith (,) env1 env2
-
-        forM_ env $ \(v, (s1, s2)) ->
-            unless (s1 == s2) $ do
-                t1 <- instantiate s1
-                t2 <- instantiate s2
-                TVar tv <- freshType
-                constraint (Union tv [t1, t2])
-                l %= M.insert v (Forall [] (TVar tv))
+    overwriteVar :: Lens' InferBlockState TypeEnv -> Var -> [Scheme] -> InferBlock ()
+    overwriteVar l v ss = do
+        s <- mapM instantiate ss >>= unionScheme
+        l %= M.insert v s
 
 inferStmt (For _ _ _ _ _ _) = undefined
 inferStmt (ForIn _ _ _ _) = undefined
@@ -414,6 +452,12 @@ inferStmt (LocalAssign _ (IdentList1 _ is) (ExpressionList _ es)) = do
 
     allNil :: [Ident a] -> InferBlock [(Var, Type)]
     allNil = mapM (\(Ident _ x) -> ((x,) . TNullable) <$> freshType)
+
+inferInnerBlock :: Block a -> InferBlock TypeEnv
+inferInnerBlock b = do
+    enterBlock
+    _ <- inferBlock b
+    exitBlock
 
 -- Enter a new block. Push the current local/global environments onto the stack,
 -- empty the local environment, and left-merge the local environment with the
@@ -496,19 +540,25 @@ constraintSolver s (c:cs) = do
         union (s' `composeSubst` s) (apply s' (t3:ts))
 
 unify :: Type -> Type -> Solve (Type, Subst)
-unify t1 t2 | t1 == t2 = pure (t1, mempty)
-unify (TVar v) t = (t,) <$> bindVar v t
-unify t (TVar v) = (t,) <$> bindVar v t
-unify (TNullable (TNonNullable t1)) t2 = unify t1 t2
-unify t1 (TNullable (TNonNullable t2)) = unify t1 t2
-unify (TNullable t1) t2 = (_1 %~ TNullable) <$> unify t1 t2
-unify t1 (TNullable t2) = (_1 %~ TNullable) <$> unify t1 t2
--- unify (TFun xs x) (TFun ys y) | length xs == length ys = do
---     (ts, s1) <- unifiesList xs ys -- unifiesList (xs ++ [x]) (ys ++ [y])
---     (t,  s2) <- unify (apply s1 x) (apply s1 y)
---     pure (TFun ts t, s2 `composeSubst` s1)
--- unify (TMany xs) (TMany ys) = error "todo" -- unifiesList xs ys -- TODO fill with TNil
-unify t1 t2 = throwError $ UnificationFail t1 t2
+unify _t1 _t2 = unify' (normalizeType _t1) (normalizeType _t2)
+  where
+    unify' :: Type -> Type -> Solve (Type, Subst)
+    unify' t1 t2 | t1 == t2 = pure (t1, mempty)
+    unify' (TVar v) t = (t,) <$> bindVar v t
+    unify' t (TVar v) = (t,) <$> bindVar v t
+    unify' (TNullable t1) t2 = (_1 %~ TNullable) <$> unify t1 t2
+    unify' t1 (TNullable t2) = (_1 %~ TNullable) <$> unify t1 t2
+    -- unify' (TFun xs x) (TFun ys y) | length xs == length ys = do
+    --     (ts, s1) <- unifiesList xs ys -- unifiesList (xs ++ [x]) (ys ++ [y])
+    --     (t,  s2) <- unify (apply s1 x) (apply s1 y)
+    --     pure (TFun ts t, s2 `composeSubst` s1)
+    -- unify' (TMany xs) (TMany ys) = error "todo" -- unifiesList xs ys -- TODO fill with TNil
+    unify' t1 t2 = throwError $ UnificationFail t1 t2
+
+    normalizeType :: Type -> Type
+    normalizeType (TNullable (TNullable t)) = normalizeType (TNullable t)
+    normalizeType (TNonNullable (TNullable t)) = normalizeType t
+    normalizeType t = t
 
 -- Precondition: lists are the same length
 -- unifyList :: [Type] -> [Type] -> Solve ([Type], Subst)
