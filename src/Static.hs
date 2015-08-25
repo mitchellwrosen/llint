@@ -8,6 +8,7 @@ import           Control.Monad.Reader
 import           Control.Monad.Writer
 import           Data.Loc
 import           Data.Sequence        (Seq, ViewL(..), ViewR(..), viewl, viewr)
+import qualified Data.Sequence        as Seq
 import           Data.Text            (Text)
 import qualified Data.Text            as T
 import           Lens.Micro
@@ -26,9 +27,9 @@ data Severity = Style | Warning | Error
   deriving (Eq, Ord)
 
 showSeverity :: Severity -> Text
-showSeverity Style   = "I"
-showSeverity Warning = "W"
-showSeverity Error   = "E"
+showSeverity Style   = "Style  "
+showSeverity Warning = "Warning"
+showSeverity Error   = "Error  "
 
 data StyleGuide = StyleGuide
     { styleGuideIndent :: Int
@@ -64,7 +65,7 @@ indent = asks styleGuideIndent
 
 -- Checks:
 -- * WARNING if there are no statements
--- * INFO if all statements do not begin at the same column.
+-- * STYLE if all statements do not begin at the same column.
 staticBlock :: Block NodeInfo -> Static ()
 staticBlock (Block info [] Nothing) = warn "Empty block" info
 staticBlock (Block _ [] (Just _)) = ok
@@ -85,7 +86,7 @@ staticStatement :: Statement NodeInfo -> Static ()
 staticStatement (EmptyStmt _) = ok
 -- Checks:
 -- * ERROR if length vs /= length es
--- * INFO if there is not one space around the '='
+-- * STYLE if there is not one space around the '='
 staticStatement (Assign info (VariableList1 vinfo vs) (ExpressionList1 einfo es)) = do
     let vlen = length vs
         elen = length es
@@ -105,7 +106,7 @@ staticStatement (Assign info (VariableList1 vinfo vs) (ExpressionList1 einfo es)
     estr n = tshow n <> " expressions"
 staticStatement (FunCall _ _) = ok
 -- Checks:
--- INFO if there is any whitespace between either '::' and the identifier
+-- STYLE if there is any whitespace between either '::' and the identifier
 staticStatement (Label info ident) = do
     let [L (Loc _ pos1) _, L (Loc pos2 pos3) _, L (Loc pos4 _) _] = info^.nodeTokens
     when (posCol pos1 + 1 /= posCol pos2 ||
@@ -114,7 +115,7 @@ staticStatement (Label info ident) = do
 staticStatement (Break _) = ok
 -- Checks:
 -- ERROR if this node exists at all
--- INFO if there is more than one space after 'goto'
+-- STYLE if there is more than one space after 'goto'
 staticStatement (Goto info ident) = do
     err "Edsger Dijkstra (March 1968). \"Go To Statement Considered Harmful\". Communications of the ACM 11 (3): 147-148." info
 
@@ -123,30 +124,64 @@ staticStatement (Goto info ident) = do
     when (posCol pos1 + 2 /= posCol pos2) $
         style "Unnecessary whitespace after 'goto'" info
 -- Checks:
--- * INFO if the inner block does not begin one line down and one indent in from the 'do'
--- * INFO if 'end' is not one line after the end of the block
--- * INFO if 'end' does not align with 'do'
+-- * STYLE if the inner block does not begin one line down and one indent in from the 'do'
+-- * STYLE if 'end' is not one line after the end of the block
+-- * STYLE if 'end' does not align with 'do'
 staticStatement (Do info block) = do
     case block of
         Block _ [] Nothing -> ok -- don't bother style checking the "do end"
-        _ -> do
-            let doPos = firstPos info
-                endPos = lastStartPos info
-                Loc blockBeginPos blockEndPos = block^.ann.nodeLoc
+        _ -> innerBlockStyleCheck (firstPos info) (lastStartPos info) block "do"
 
-            i <- indent
-            when (posLine doPos + 1 /= posLine blockBeginPos ||
-                  posCol  doPos + i /= posCol  blockBeginPos) $
-                style ("Do-block should be on a new line and indented " <> tshow i <> " spaces") blockBeginPos
+-- Checks:
+-- * STYLE if there is not one space after 'while'
+-- * STYLE if there is not one space before 'do'
+-- * STYLE if 'while' and 'do' are not on the same line
+-- * STYLE if 'end' does not align with 'while'
+staticStatement (While info exp block) = do
+    let whilePos    = firstPos info
+        whileEndPos = firstEndPos info
+        condPos     = firstPos exp
+        condEndPos  = lastPos exp
+        doPos       = firstPos $ (info^.nodeTokens) ! (1 + length (exp^.ann.nodeTokens))
+        endPos      = lastStartPos info
 
-            when (posLine blockEndPos + 1 /= posLine endPos) $
-                style "Unnecessary newline before 'end'" endPos
+    when (posCol whileEndPos + 2 /= posCol condPos) $
+        style "Unnecessary whitespace after 'while'" whilePos
 
-            when (posCol doPos /= posCol endPos) $
-                style "'end' does not align with corresponding 'do'" endPos
--- TODO: the rest
-staticStatement (While info exp block) = ok
+    -- Don't want to double-warn when both the line and column of 'do' are incorrect.
+    if posLine whilePos /= posLine doPos
+        then style "Unnecessary newline before 'do'" doPos
+        else when (posCol condEndPos + 2 /= posCol doPos) $
+                 style "Unnecessary whitespace before 'do'" doPos
+
+    innerBlockStyleCheck whilePos endPos block "while"
+
 staticStatement _ = ok
+
+-- Checks:
+-- STYLE if inner block is not one line down and one indent in from beginning location.
+-- STYLE if there is a blank line before 'end'
+-- STYLE if the 'end' does not align with the corresponding begin token.
+innerBlockStyleCheck :: Pos -> Pos -> Block NodeInfo -> Text -> Static ()
+innerBlockStyleCheck p1 p2 block name = do
+    let Loc blockBeginPos blockEndPos = block^.ann.nodeLoc
+
+    i <- indent
+    when (posLine p1 + 1 /= posLine blockBeginPos ||
+          posCol  p1 + i /= posCol  blockBeginPos) $
+        style ("Inner block should be on a new line and indented " <> tshow i <> " spaces") blockBeginPos
+
+    when (posLine blockEndPos + 1 /= posLine p2) $
+        style "Unnecessary newline before 'end'" p2
+
+    when (posCol p1 /= posCol p2) $
+        style ("'end' does not align with corresponding '" <> name <> "'") p2
+
+infixl 9 !
+(!) :: Seq a -> Int -> a
+s ! n = case viewl (Seq.drop n s) of
+            x :< _ -> x
+            _ -> error "(!): index out of range"
 
 tshow :: Show a => a -> Text
 tshow = T.pack . show

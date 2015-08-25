@@ -7,7 +7,8 @@ import Language.Lua.Syntax
 import Language.Lua.Token
 import Lens.Micro
 
--- Simple typeclass to abstract getting positions out of a structure.
+-- Simple typeclass to abstract getting positions out of a structure. srcloc's
+-- Loc is assumed never to NoLoc.
 class HasPos a where
     firstPos     :: a -> Pos -- Start of the first pos (the "very first" pos).
     firstEndPos  :: a -> Pos -- End of the first pos.
@@ -19,39 +20,51 @@ class HasPos a where
 instance HasPos NodeInfo where
     firstPos info =
         case viewl (info^.nodeTokens) of
-            EmptyL       -> let Loc pos _ = info^.nodeLoc in pos
-            L loc _ :< _ -> let Loc pos _ = loc in pos
+            EmptyL -> firstPos (info^.nodeLoc)
+            l :< _ -> firstPos l
 
     firstEndPos info =
         case viewl (info^.nodeTokens) of
-            EmptyL       -> let Loc _ pos = info^.nodeLoc in pos
-            L loc _ :< _ -> let Loc _ pos = loc in pos
+            EmptyL -> firstEndPos (info^.nodeLoc)
+            l :< _ -> firstEndPos l
 
     lastPos info =
         case viewr (info^.nodeTokens) of
-            EmptyR       -> let Loc _ pos = info^.nodeLoc in pos
-            _ :> L loc _ -> let Loc _ pos = loc in pos
+            EmptyR -> lastPos (info^.nodeLoc)
+            _ :> l -> lastPos l
 
     lastStartPos info =
         case viewr (info^.nodeTokens) of
-            EmptyR       -> let Loc pos _ = info^.nodeLoc in pos
-            _ :> L loc _ -> let Loc pos _ = loc in pos
+            EmptyR -> lastStartPos (info^.nodeLoc)
+            _ :> l -> lastStartPos l
 
 -- A Seq's position functions assume there is at least one element.
 instance HasPos (Seq (L Token)) where
-    firstPos     (viewl -> L (Loc pos _) _ :< _) = pos
-    firstEndPos  (viewl -> L (Loc _ pos) _ :< _) = pos
-    lastPos      (viewr -> _ :> L (Loc _ pos) _) = pos
-    lastStartPos (viewr -> _ :> L (Loc pos _) _) = pos
-
-instance HasPos Pos where
-    firstPos     = id
-    firstEndPos  = id
-    lastPos      = id
-    lastStartPos = id
+    firstPos     (viewl -> l :< _) = firstPos     l
+    firstEndPos  (viewl -> l :< _) = firstEndPos  l
+    lastPos      (viewr -> _ :> l) = lastPos      l
+    lastStartPos (viewr -> _ :> l) = lastStartPos l
 
 instance Annotated f => HasPos (f NodeInfo) where
     firstPos         = firstPos     . (^.ann)
     firstEndPos      = firstEndPos  . (^.ann)
     lastPos          = lastPos      . (^.ann)
     lastStartPos     = lastStartPos . (^.ann)
+
+instance HasPos Loc where
+    firstPos     (Loc pos _) = pos
+    firstEndPos  (Loc _ pos) = pos
+    lastPos      (Loc _ pos) = pos
+    lastStartPos (Loc pos _) = pos
+
+instance HasPos (L a) where
+    firstPos     (L loc _) = firstPos     loc
+    firstEndPos  (L loc _) = firstEndPos  loc
+    lastPos      (L loc _) = lastPos      loc
+    lastStartPos (L loc _) = lastStartPos loc
+
+instance HasPos Pos where
+    firstPos     = id
+    firstEndPos  = id
+    lastPos      = id
+    lastStartPos = id
