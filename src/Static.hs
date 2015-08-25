@@ -124,9 +124,7 @@ staticStatement (Goto info ident) = do
     when (posCol pos1 + 2 /= posCol pos2) $
         style "Unnecessary whitespace after 'goto'" info
 -- Checks:
--- * STYLE if the inner block does not begin one line down and one indent in from the 'do'
--- * STYLE if 'end' is not one line after the end of the block
--- * STYLE if 'end' does not align with 'do'
+-- * The block is is an inner block
 staticStatement (Do info block) = do
     case block of
         Block _ [] Nothing -> ok -- don't bother style checking the "do end"
@@ -135,7 +133,7 @@ staticStatement (Do info block) = do
 -- * STYLE if there is not one space after 'while'
 -- * STYLE if there is not one space before 'do'
 -- * STYLE if 'while' and 'do' are not on the same line
--- * STYLE if 'end' does not align with 'while'
+-- * The block is an inner block
 staticStatement (While info exp block) = do
     let whilePos    = firstPos info
         whileEndPos = firstEndPos info
@@ -154,6 +152,10 @@ staticStatement (While info exp block) = do
                  style "Unnecessary whitespace before 'do'" doPos
 
     innerBlockStyleCheck whilePos endPos block "while" "end"
+-- Checks:
+-- * STYLE if there is not one space after 'until'
+-- * STYLE if the condition and 'until' are not on the same line
+-- * The block is an inner block
 staticStatement (Repeat info block exp) = do
     let repeatPos   = firstPos info
         untilToken  = (info^.nodeTokens) ! (1 + length (block^.ann^.nodeTokens))
@@ -169,7 +171,52 @@ staticStatement (Repeat info block exp) = do
         then style "Unnecessary newline after 'until'" untilPos
         else when (posCol untilEndPos + 2 /= posCol condPos) $
                  style "Unnecessary whitespace after 'until'" untilPos
-staticStatement _ = ok
+staticStatement (If info ebs mb) = ok
+-- Checks:
+-- * STYLE if 'for' and 'do' are not on the same line
+-- * The block is an inner block
+-- TODO: Check whitespace around '=' and ','
+staticStatement (For info x e1 e2 me3 block) = do
+    let forPos = firstPos info
+        doPos  = firstPos $
+            (info^.nodeTokens) ! (4 + length (e1^.ann.nodeTokens)
+                                  + length (e2^.ann.nodeTokens)
+                                  + maybe 0 (\e3 -> 1 + length (e3^.ann.nodeTokens)) me3)
+        endPos = lastStartPos info
+
+    when (posLine forPos /= posLine doPos) $
+        style "Unnecessary newline before 'do'" doPos
+
+    innerBlockStyleCheck forPos endPos block "for" "end"
+-- Checks:
+-- * STYLE if 'for' and 'do' are not on the same line
+-- * The block is an inner block
+-- TODO: Check whitespace around 'in' and ','
+staticStatement (ForIn info is es block) = do
+    let forPos = firstPos info
+        doPos  = firstPos $
+            (info^.nodeTokens) ! (2 + length (is^.ann.nodeTokens)
+                                  + length (es^.ann.nodeTokens))
+        endPos = lastStartPos info
+
+    when (posLine forPos /= posLine doPos) $
+        style "Unnecessary newline before 'do'" doPos
+
+    innerBlockStyleCheck forPos endPos block "for" "end"
+-- Checks:
+-- * STYLE if there is a space between function name and '('
+-- * The body's block is an inner block
+staticStatement (FunAssign info name body) = do
+    let functionPos              = firstPos info
+        nameLastPos              = lastPos name
+        bodyPos                  = firstPos body
+        FunctionBody _ _ _ block = body
+        endPos                   = lastStartPos info
+
+    when (posCol nameLastPos + 1 /= posCol bodyPos) $ do
+        style "Unnecessary whitespace after function name" nameLastPos
+
+    innerBlockStyleCheck functionPos endPos block "function" "end"
 
 -- Checks:
 -- STYLE if inner block is not one line down and one indent in from beginning location.
