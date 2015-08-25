@@ -130,8 +130,7 @@ staticStatement (Goto info ident) = do
 staticStatement (Do info block) = do
     case block of
         Block _ [] Nothing -> ok -- don't bother style checking the "do end"
-        _ -> innerBlockStyleCheck (firstPos info) (lastStartPos info) block "do"
-
+        _ -> innerBlockStyleCheck (firstPos info) (lastStartPos info) block "do" "end"
 -- Checks:
 -- * STYLE if there is not one space after 'while'
 -- * STYLE if there is not one space before 'do'
@@ -154,16 +153,30 @@ staticStatement (While info exp block) = do
         else when (posCol condEndPos + 2 /= posCol doPos) $
                  style "Unnecessary whitespace before 'do'" doPos
 
-    innerBlockStyleCheck whilePos endPos block "while"
+    innerBlockStyleCheck whilePos endPos block "while" "end"
+staticStatement (Repeat info block exp) = do
+    let repeatPos   = firstPos info
+        untilToken  = (info^.nodeTokens) ! (1 + length (block^.ann^.nodeTokens))
+        untilPos    = firstPos untilToken
+        untilEndPos = lastPos untilToken
+        condPos     = firstPos exp
 
+    innerBlockStyleCheck repeatPos untilPos block "repeat" "until"
+
+    -- Don't want to double warn when both the line and column of the expression
+    -- are incorrect.
+    if posLine untilPos /= posLine condPos
+        then style "Unnecessary newline after 'until'" untilPos
+        else when (posCol untilEndPos + 2 /= posCol condPos) $
+                 style "Unnecessary whitespace after 'until'" untilPos
 staticStatement _ = ok
 
 -- Checks:
 -- STYLE if inner block is not one line down and one indent in from beginning location.
 -- STYLE if there is a blank line before 'end'
 -- STYLE if the 'end' does not align with the corresponding begin token.
-innerBlockStyleCheck :: Pos -> Pos -> Block NodeInfo -> Text -> Static ()
-innerBlockStyleCheck p1 p2 block name = do
+innerBlockStyleCheck :: Pos -> Pos -> Block NodeInfo -> Text -> Text -> Static ()
+innerBlockStyleCheck p1 p2 block name1 name2 = do
     let Loc blockBeginPos blockEndPos = block^.ann.nodeLoc
 
     i <- indent
@@ -175,7 +188,7 @@ innerBlockStyleCheck p1 p2 block name = do
         style "Unnecessary newline before 'end'" p2
 
     when (posCol p1 /= posCol p2) $
-        style ("'end' does not align with corresponding '" <> name <> "'") p2
+        style ("'" <> name2 <> "' does not align with corresponding '" <> name1 <> "'") p2
 
 infixl 9 !
 (!) :: Seq a -> Int -> a
