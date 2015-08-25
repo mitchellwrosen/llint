@@ -1,6 +1,6 @@
 module HasPos where
 
-import SrcLoc
+import Data.Loc
 import Data.Sequence (Seq, ViewL(..), ViewR(..), viewl, viewr)
 import Language.Lua.Parser
 import Language.Lua.Syntax

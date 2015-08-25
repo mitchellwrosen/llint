@@ -15,9 +15,10 @@ cabal-version:       >=1.10
 
 library
   hs-source-dirs:      src
-  exposed-modules:     Queries
-                     , Static
+  exposed-modules:     HasPos
                      , Infer
+                     , Queries
+                     , Static
   build-depends:       base >= 4.7 && < 5
                      , containers
                      , language-lua
