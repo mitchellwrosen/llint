@@ -85,13 +85,13 @@ staticBlock (Block info (s:ss) mr) = do
 staticStatement :: Statement NodeInfo -> Static ()
 staticStatement (EmptyStmt _) = ok
 -- Checks:
--- * ERROR if length vs /= length es
+-- * ERROR if length vs < length es
 -- * STYLE if there is not one space around the '='
 staticStatement (Assign info (VariableList1 vinfo vs) (ExpressionList1 einfo es)) = do
     let vlen = length vs
         elen = length es
-    when (vlen /= elen) $
-        err ("Assignment length mismatch: found " <> vstr vlen <> estr elen) info
+    when (vlen < elen) $
+        err ("Unused expression(s) in assignment: found " <> vstr vlen <> estr elen) info
 
     let pos1 = lastPos vinfo
         pos2 = firstPos einfo
