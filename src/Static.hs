@@ -63,6 +63,9 @@ ok = pure ()
 indent :: Static Int
 indent = asks styleGuideIndent
 
+--------------------------------------------------------------------------------
+-- Static checks
+
 -- Checks:
 -- * WARNING if there are no statements
 -- * STYLE if all statements do not begin at the same column.
@@ -98,7 +101,6 @@ staticStatement (Assign info (VariableList1 vinfo vs) (ExpressionList1 einfo es)
     when (posCol pos1 + 4 /= posCol pos2) $
         style "Improper whitespace around '='" pos1
   where
-    -- Yeah, I went there.
     vstr 1 = "1 variable and "
     vstr n = tshow n <> " variables and "
 
@@ -217,6 +219,33 @@ staticStatement (FunAssign info name body) = do
         style "Unnecessary whitespace after function name" nameLastPos
 
     innerBlockStyleCheck functionPos endPos block "function" "end"
+-- Checks:
+-- * STYLE if there is a space between function name and '('
+-- * The body's block is an inner block
+staticStatement (LocalFunAssign info name body) = do
+    let localPos                 = firstPos info
+        nameLastPos              = lastPos name
+        bodyPos                  = firstPos body
+        FunctionBody _ _ _ block = body
+        endPos                   = lastStartPos info
+
+    when (posCol nameLastPos + 1 /= posCol bodyPos) $ do
+        style "Unnecessary whitespace after function name" nameLastPos
+
+    innerBlockStyleCheck localPos endPos block "local" "end"
+-- Checks:
+-- * ERROR if length is < length es
+staticStatement (LocalAssign info (IdentList1 _ is) (ExpressionList _ es)) = do
+    let ilen = length is
+        elen = length es
+    when (ilen < elen) $
+        err ("Unused expression(s) in local assignment: found " <> istr ilen <> estr elen) info
+  where
+    istr 1 = "1 identifier and "
+    istr n = tshow n <> " identifiers and "
+
+    estr 1 = "1 expression"
+    estr n = tshow n <> " expressions"
 
 -- Checks:
 -- STYLE if inner block is not one line down and one indent in from beginning location.
@@ -236,6 +265,54 @@ innerBlockStyleCheck p1 p2 block name1 name2 = do
 
     when (posCol p1 /= posCol p2) $
         style ("'" <> name2 <> "' does not align with corresponding '" <> name1 <> "'") p2
+
+staticReturnStatement :: ReturnStatement NodeInfo -> Static ()
+staticReturnStatement _ = ok
+
+staticFunctionName :: FunctionName NodeInfo -> Static ()
+staticFunctionName _ = ok
+
+staticVariable :: Variable NodeInfo -> Static ()
+staticVariable _ = ok
+
+staticVariableList1 :: VariableList1 NodeInfo -> Static ()
+staticVariableList1 _ = ok
+
+staticExpression :: Expression NodeInfo -> Static ()
+staticExpression _ = ok
+
+staticExpressionList :: ExpressionList NodeInfo -> Static ()
+staticExpressionList _ = ok
+
+staticExpressionList1 :: ExpressionList1 NodeInfo -> Static ()
+staticExpressionList1 _ = ok
+
+staticPrefixExpression :: PrefixExpression NodeInfo -> Static ()
+staticPrefixExpression _ = ok
+
+staticFunctionCall :: FunctionCall NodeInfo -> Static ()
+staticFunctionCall _ = ok
+
+staticFunctionArgs :: FunctionArgs NodeInfo -> Static ()
+staticFunctionArgs _ = ok
+
+staticFunctionBody :: FunctionBody NodeInfo -> Static ()
+staticFunctionBody _ = ok
+
+staticTableConstructor :: TableConstructor NodeInfo -> Static ()
+staticTableConstructor _ = ok
+
+staticField :: Field NodeInfo -> Static ()
+staticField _ = ok
+
+staticFieldList :: FieldList NodeInfo -> Static ()
+staticFieldList _ = ok
+
+staticBinop :: Binop NodeInfo -> Static ()
+staticBinop _ = ok
+
+staticUnop :: Unop NodeInfo -> Static ()
+staticUnop _ = ok
 
 infixl 9 !
 (!) :: Seq a -> Int -> a
