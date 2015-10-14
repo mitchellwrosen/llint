@@ -96,10 +96,7 @@ staticStatement (Assign info (VariableList1 vinfo vs) (ExpressionList1 einfo es)
     when (vlen < elen) $
         err ("Unused expression(s) in assignment: found " <> vstr vlen <> estr elen) info
 
-    let eqPos = firstPos (Seq.drop (length (vinfo^.nodeTokens)) (info^.nodeTokens))
-    when (posCol (lastPos vinfo) + 2 /= posCol eqPos ||
-          posCol eqPos + 2 /= posCol (firstPos einfo)) $
-        style "Improper whitespace around '='" eqPos
+    asgnStyle info vinfo einfo
   where
     vstr 1 = "1 variable and "
     vstr n = tshow n <> " variables and "
@@ -310,6 +307,8 @@ staticTableConstructor :: TableConstructor NodeInfo -> Static ()
 staticTableConstructor _ = ok
 
 staticField :: Field NodeInfo -> Static ()
+staticField (FieldExp info e1 e2) = asgnStyle info (e1^.ann) (e2^.ann)
+staticField (FieldIdent info i e) = asgnStyle info (i^.ann) (e^.ann)
 staticField _ = ok
 
 staticFieldList :: FieldList NodeInfo -> Static ()
@@ -320,6 +319,32 @@ staticBinop _ = ok
 
 staticUnop :: Unop NodeInfo -> Static ()
 staticUnop _ = ok
+
+--------------------------------------------------------------------------------
+
+-- Style-check a "blah = blah", which occurs in multiple locations in the AST.
+asgnStyle
+    :: NodeInfo -- ^ Entire node info
+    -> NodeInfo -- ^ Node info of LHS
+    -> NodeInfo -- ^ Node info of RHS
+    -> Static ()
+asgnStyle i1 i2 i3 = do
+    -- i1 == "foobar = bazwhat"
+    -- i2 == "foobar"
+    -- i3 == "bazwhat"
+    --
+    --       p1  p3
+    --       v   v
+    -- "foobar = bazwhat"
+    --         ^
+    --         p2
+    let p1 = lastPos i2
+        p2 = firstPos (Seq.drop (length (i2^.nodeTokens)) (i1^.nodeTokens))
+        p3 = firstPos i3
+
+    when (posCol p1 + 2 /= posCol p2 ||
+          posCol p2 + 2 /= posCol p3) $
+        style "Improper whitespace around '='" p2
 
 infixl 9 !
 (!) :: Seq a -> Int -> a
