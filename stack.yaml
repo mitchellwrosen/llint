@@ -1,8 +1,7 @@
 flags: {}
 packages:
 - '.'
-- location:
-    git: https://github.com/mitchellwrosen/lua-parser
-    commit: 53747bc3268c2bd57e33d5001ec431938da58eee
-extra-deps: []
-resolver: nightly-2015-08-07
+extra-deps:
+- language-lua2-0.1.0.3
+- Earley-0.10.0
+resolver: lts-3.9
