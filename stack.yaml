@@ -2,6 +2,6 @@ flags: {}
 packages:
 - '.'
 extra-deps:
-- language-lua2-0.1.0.3
+- language-lua2-0.1.0.4
 - Earley-0.10.0
 resolver: lts-3.9
