@@ -96,10 +96,10 @@ staticStatement (Assign info (VariableList1 vinfo vs) (ExpressionList1 einfo es)
     when (vlen < elen) $
         err ("Unused expression(s) in assignment: found " <> vstr vlen <> estr elen) info
 
-    let pos1 = lastPos vinfo
-        pos2 = firstPos einfo
-    when (posCol pos1 + 4 /= posCol pos2) $
-        style "Improper whitespace around '='" pos1
+    let eqPos = firstPos (Seq.drop vlen (info^.nodeTokens))
+    when (posCol (lastPos vinfo) + 2 /= posCol eqPos ||
+          posCol eqPos + 2 /= posCol (firstPos einfo)) $
+        style "Improper whitespace around '='" eqPos
   where
     vstr 1 = "1 variable and "
     vstr n = tshow n <> " variables and "
@@ -266,8 +266,15 @@ innerBlockStyleCheck p1 p2 block name1 name2 = do
     when (posCol p1 /= posCol p2) $
         style ("'" <> name2 <> "' does not align with corresponding '" <> name1 <> "'") p2
 
+-- Checks:
+-- STYLE if there is more than one space after 'return'
 staticReturnStatement :: ReturnStatement NodeInfo -> Static ()
-staticReturnStatement _ = ok
+staticReturnStatement (ReturnStatement _ (ExpressionList _ [])) = ok
+staticReturnStatement (ReturnStatement info _ ) = do
+    let tk1 :< rest = viewl (info^.nodeTokens)
+        tk2 :< _    = viewl rest
+    when (posCol (lastPos tk1) + 2 /= posCol (firstPos tk2)) $
+        style "Unnecessary whitespace after 'return'" tk1
 
 staticFunctionName :: FunctionName NodeInfo -> Static ()
 staticFunctionName _ = ok
