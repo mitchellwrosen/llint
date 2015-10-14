@@ -17,7 +17,6 @@ library
   hs-source-dirs:      src
   exposed-modules:     HasPos
                      , Infer
-                     , Queries
                      , Static
   build-depends:       base >= 4.7 && < 5
                      , containers
@@ -27,7 +26,6 @@ library
                      , srcloc
                      , semigroups
                      , text
-                     , uniplate
   default-language:    Haskell2010
   default-extensions:  FlexibleContexts
                      , FlexibleInstances
@@ -49,6 +47,7 @@ executable llint
                      , llint
                      , mtl
                      , text
+                     , uniplate
   default-language:    Haskell2010
 
 test-suite llint-test
