@@ -96,7 +96,7 @@ staticStatement (Assign info (VariableList1 vinfo vs) (ExpressionList1 einfo es)
     when (vlen < elen) $
         err ("Unused expression(s) in assignment: found " <> vstr vlen <> estr elen) info
 
-    let eqPos = firstPos (Seq.drop vlen (info^.nodeTokens))
+    let eqPos = firstPos (Seq.drop (length (vinfo^.nodeTokens)) (info^.nodeTokens))
     when (posCol (lastPos vinfo) + 2 /= posCol eqPos ||
           posCol eqPos + 2 /= posCol (firstPos einfo)) $
         style "Improper whitespace around '='" eqPos
