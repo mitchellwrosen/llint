@@ -38,6 +38,13 @@ instance HasPos NodeInfo where
             EmptyR -> lastStartPos (info^.nodeLoc)
             _ :> l -> lastStartPos l
 
+-- A list's position functions assume there is at least one element.
+instance HasPos [L Token] where
+    firstPos     (l:_) = firstPos     l
+    firstEndPos  (l:_) = firstEndPos  l
+    lastPos      (l:_) = lastPos      l
+    lastStartPos (l:_) = lastStartPos l
+
 -- A Seq's position functions assume there is at least one element.
 instance HasPos (Seq (L Token)) where
     firstPos     (viewl -> l :< _) = firstPos     l

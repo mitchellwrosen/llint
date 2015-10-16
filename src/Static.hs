@@ -96,7 +96,7 @@ staticStatement (Assign info (VariableList1 vinfo vs) (ExpressionList1 einfo es)
     when (vlen < elen) $
         err ("Unused expression(s) in assignment: found " <> vstr vlen <> estr elen) info
 
-    asgnStyle info vinfo einfo
+    asgnStyle (info^.nodeTokens) (vinfo^.nodeTokens) (einfo^.nodeTokens)
   where
     vstr 1 = "1 variable and "
     vstr n = tshow n <> " variables and "
@@ -307,8 +307,15 @@ staticTableConstructor :: TableConstructor NodeInfo -> Static ()
 staticTableConstructor _ = ok
 
 staticField :: Field NodeInfo -> Static ()
-staticField (FieldExp info e1 e2) = asgnStyle info (e1^.ann) (e2^.ann)
-staticField (FieldIdent info i e) = asgnStyle info (i^.ann) (e^.ann)
+staticField (FieldExp info e1 e2) =
+    asgnStyle xs ls rs
+  where
+    xs, ls, rs :: Seq (L Token)
+    xs = info^.nodeTokens
+    -- All of the tokens of the expression, plus the '[' ']'
+    ls = Seq.take (2 + length (e1^.ann^.nodeTokens)) xs
+    rs = e2^.ann.nodeTokens
+staticField (FieldIdent info i e) = asgnStyle (info^.nodeTokens) (i^.ann.nodeTokens) (e^.ann.nodeTokens)
 staticField _ = ok
 
 staticFieldList :: FieldList NodeInfo -> Static ()
@@ -324,23 +331,23 @@ staticUnop _ = ok
 
 -- Style-check a "blah = blah", which occurs in multiple locations in the AST.
 asgnStyle
-    :: NodeInfo -- ^ Entire node info
-    -> NodeInfo -- ^ Node info of LHS
-    -> NodeInfo -- ^ Node info of RHS
+    :: Seq (L Token) -- ^ All tokens
+    -> Seq (L Token) -- ^ Tokens of LHS
+    -> Seq (L Token) -- ^ Tokens of RHS
     -> Static ()
-asgnStyle i1 i2 i3 = do
-    -- i1 == "foobar = bazwhat"
-    -- i2 == "foobar"
-    -- i3 == "bazwhat"
+asgnStyle xs ls rs = do
+    -- xs == [foobar, =, bazwhat]
+    -- ls == [foobar]
+    -- rs == [bazwhat]
     --
-    --       p1  p3
-    --       v   v
-    -- "foobar = bazwhat"
-    --         ^
-    --         p2
-    let p1 = lastPos i2
-        p2 = firstPos (Seq.drop (length (i2^.nodeTokens)) (i1^.nodeTokens))
-        p3 = firstPos i3
+    --      p1  p3
+    --      v   v
+    -- foobar = bazwhat
+    --        ^
+    --        p2
+    let p1 = lastPos ls
+        p2 = firstPos (Seq.drop (length ls) xs)
+        p3 = firstPos rs
 
     when (posCol p1 + 2 /= posCol p2 ||
           posCol p2 + 2 /= posCol p3) $
