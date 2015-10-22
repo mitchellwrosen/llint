@@ -18,8 +18,10 @@ library
   exposed-modules:     HasPos
                      , Infer
                      , Static
+                     , Trav
   build-depends:       base >= 4.7 && < 5
                      , containers
+                     , dlist
                      , language-lua2
                      , microlens
                      , mtl
@@ -27,27 +29,17 @@ library
                      , semigroups
                      , text
   default-language:    Haskell2010
-  default-extensions:  FlexibleContexts
-                     , FlexibleInstances
-                     , GeneralizedNewtypeDeriving
-                     , OverloadedLists
-                     , OverloadedStrings
-                     , RankNTypes
-                     , ScopedTypeVariables
-                     , TupleSections
-                     , ViewPatterns
   ghc-options:        -Wall
 
 executable llint
   hs-source-dirs:      app
   main-is:             Main.hs
-  ghc-options:         -threaded -rtsopts -with-rtsopts=-N
+  ghc-options:         -O2 -threaded -rtsopts -with-rtsopts=-N
   build-depends:       base
                      , language-lua2
                      , llint
                      , mtl
                      , text
-                     , uniplate
   default-language:    Haskell2010
 
 test-suite llint-test

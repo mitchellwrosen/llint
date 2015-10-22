@@ -1,11 +1,23 @@
+{-# LANGUAGE BangPatterns      #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedLists   #-}
+
 -- | Static analysis of Lua code; each AST node is analyzed in isolation.
 
-module Static where
+module Static
+    ( staticAnalysis
+    , StyleGuide(..)
+    , Suggestion(..)
+    , showSuggestion
+    ) where
 
 import HasPos
+import Trav
 
 import           Control.Monad.Reader
 import           Control.Monad.Writer
+import           Data.DList           (DList)
+import qualified Data.DList           as DL
 import           Data.Loc
 import           Data.Sequence        (Seq, ViewL(..), ViewR(..), viewl, viewr)
 import qualified Data.Sequence        as Seq
@@ -32,15 +44,40 @@ showSeverity Warning = "Warning"
 showSeverity Error   = "Error  "
 
 data StyleGuide = StyleGuide
-    { styleGuideIndent :: Int
+    { styleGuideIndent :: !Int
     }
 
 -- | Static analysis monad. It has a style guide environment and outputs
 -- suggestions.
-type Static a = ReaderT StyleGuide (Writer (Seq Suggestion)) a
+type Static a = ReaderT StyleGuide (Writer (DList Suggestion)) a
 
-runStatic :: StyleGuide -> Static a -> Seq Suggestion
-runStatic g s = snd $ runWriter (runReaderT s g)
+staticAnalysis :: StyleGuide -> Block NodeInfo -> [Suggestion]
+staticAnalysis styleGuide block =
+    DL.toList (execWriter (runReaderT (traverseLuaChunk callbacks block) styleGuide))
+  where
+    callbacks = Callbacks
+        { onIdent            = const ok
+        , onIdentList        = const ok
+        , onIdentList1       = const ok
+        , onBlock            = staticBlock
+        , onStatement        = staticStatement
+        , onReturnStatement  = staticReturnStatement
+        , onFunctionName     = const ok
+        , onVariable         = const ok
+        , onVariableList1    = const ok
+        , onExpression       = const ok
+        , onExpressionList   = const ok
+        , onExpressionList1  = const ok
+        , onPrefixExpression = const ok
+        , onFunctionCall     = const ok
+        , onFunctionArgs     = const ok
+        , onFunctionBody     = const ok
+        , onTableConstructor = const ok
+        , onField            = staticField
+        , onFieldList        = const ok
+        , onBinop            = const ok
+        , onUnop             = const ok
+        }
 
 style :: HasPos a => Text -> a -> Static ()
 style = suggest Style
@@ -273,39 +310,6 @@ staticReturnStatement (ReturnStatement info _ ) = do
     when (posCol (lastPos tk1) + 2 /= posCol (firstPos tk2)) $
         style "Unnecessary whitespace after 'return'" tk1
 
-staticFunctionName :: FunctionName NodeInfo -> Static ()
-staticFunctionName _ = ok
-
-staticVariable :: Variable NodeInfo -> Static ()
-staticVariable _ = ok
-
-staticVariableList1 :: VariableList1 NodeInfo -> Static ()
-staticVariableList1 _ = ok
-
-staticExpression :: Expression NodeInfo -> Static ()
-staticExpression _ = ok
-
-staticExpressionList :: ExpressionList NodeInfo -> Static ()
-staticExpressionList _ = ok
-
-staticExpressionList1 :: ExpressionList1 NodeInfo -> Static ()
-staticExpressionList1 _ = ok
-
-staticPrefixExpression :: PrefixExpression NodeInfo -> Static ()
-staticPrefixExpression _ = ok
-
-staticFunctionCall :: FunctionCall NodeInfo -> Static ()
-staticFunctionCall _ = ok
-
-staticFunctionArgs :: FunctionArgs NodeInfo -> Static ()
-staticFunctionArgs _ = ok
-
-staticFunctionBody :: FunctionBody NodeInfo -> Static ()
-staticFunctionBody _ = ok
-
-staticTableConstructor :: TableConstructor NodeInfo -> Static ()
-staticTableConstructor _ = ok
-
 staticField :: Field NodeInfo -> Static ()
 staticField (FieldExp info e1 e2) =
     asgnStyle xs ls rs
@@ -317,15 +321,6 @@ staticField (FieldExp info e1 e2) =
     rs = e2^.ann.nodeTokens
 staticField (FieldIdent info i e) = asgnStyle (info^.nodeTokens) (i^.ann.nodeTokens) (e^.ann.nodeTokens)
 staticField _ = ok
-
-staticFieldList :: FieldList NodeInfo -> Static ()
-staticFieldList _ = ok
-
-staticBinop :: Binop NodeInfo -> Static ()
-staticBinop _ = ok
-
-staticUnop :: Unop NodeInfo -> Static ()
-staticUnop _ = ok
 
 --------------------------------------------------------------------------------
 
@@ -355,9 +350,9 @@ asgnStyle xs ls rs = do
 
 infixl 9 !
 (!) :: Seq a -> Int -> a
-s ! n = case viewl (Seq.drop n s) of
-            x :< _ -> x
-            _ -> error "(!): index out of range"
+(!) s n = case viewl (Seq.drop n s) of
+              x :< _ -> x
+              _ -> error "(!): index out of range"
 
 tshow :: Show a => a -> Text
 tshow = T.pack . show
